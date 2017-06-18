@@ -9,7 +9,7 @@ import tempfile
 import docker
 from tqdm import tqdm
 
-client = docker.from_env()
+tmp_dir = tempfile.mkdtemp(prefix='rolca_', dir='/tmp')
 
 scripts_path = os.path.join(
     os.path.dirname(os.path.realpath(__file__)),
@@ -18,26 +18,36 @@ scripts_path = os.path.join(
 
 with open('.tmp/stage_01.pickle', 'rb') as input_fn:
     data = pickle.load(input_fn)
-
-for i in tqdm(data):
-    tmp_dir = tempfile.mkdtemp(prefix='rolca_', dir='/tmp')
-    shutil.copy(os.path.join('.tmp', data[i]['file']), tmp_dir)
     
-    file_name = os.path.basename(data[i]['file'])
+client = docker.from_env()
+container = client.containers.create(
+    'centos-opencv', 
+    '/bin/bash',
+    volumes={
+        tmp_dir: {'bind': '/data', 'mode': 'rw'},
+        scripts_path: {'bind': '/scripts', 'mode': 'ro'},
+    },
+    stdin_open=True,
+    tty=True
+)
+container.start()
 
-    result = client.containers.run(
-        "centos-opencv",
-        command=shlex.split("sh -c 'run_cv.py {}'".format(file_name)),
-        volumes={
-            tmp_dir: {'bind': '/data', 'mode': 'rw'},
-            scripts_path: {'bind': '/scripts', 'mode': 'ro'},
-        },
-        remove=True,
-    )
-    
+try:
+    bar_format = '{desc}{percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+
+    for i in tqdm(data, bar_format=bar_format):
+        shutil.copy(os.path.join('.tmp', data[i]['file']), tmp_dir)
+        file_name = os.path.basename(data[i]['file'])
+
+        result = container.exec_run('run_cv.py {}'.format(file_name))
+        data[i].update(json.loads(result))
+
+        os.remove(os.path.join(tmp_dir, file_name))
+finally:
+    container.kill()
+    container.remove()
+
     shutil.rmtree(tmp_dir)
 
-    data[i].update(json.loads(result))
-
-
-print(data[1])
+with open('.tmp/stage_02.pickle', 'wb') as output_fn:
+    data = pickle.dump(data, output_fn)
